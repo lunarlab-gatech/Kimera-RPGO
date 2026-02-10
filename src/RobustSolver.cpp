@@ -461,6 +461,84 @@ void RobustSolver::saveData(std::string folder_path) const {
       gnc_file << gnc_weights_.format(CSVFormat);
       gnc_file.close();
     }
+
+    // Save inlier loop closures to separate g2o files by type
+    // Loop closures are BetweenFactors where key1 + 1 != key2 (non-consecutive keys)
+    std::ofstream intra_robot0_stream(folder_path + "/inlier_lc_intra_robot0.g2o");
+    std::ofstream intra_robot1_stream(folder_path + "/inlier_lc_intra_robot1.g2o");
+    std::ofstream inter_robot_stream(folder_path + "/inlier_lc_inter_robot.g2o");
+
+    for (size_t i = 0; i < nfg_.size() && i < static_cast<size_t>(gnc_weights_.size()); i++) {
+      const auto& factor_ = nfg_[i];
+      auto factor3D = factor_pointer_cast<gtsam::BetweenFactor<gtsam::Pose3>>(factor_);
+      if (factor3D) {
+        gtsam::Key key1 = factor3D->key1();
+        gtsam::Key key2 = factor3D->key2();
+        // Skip odometry (consecutive keys)
+        if (key1 + 1 == key2) continue;
+
+        // Get robot prefixes using gtsam::Symbol
+        char robot1 = gtsam::Symbol(key1).chr();
+        char robot2 = gtsam::Symbol(key2).chr();
+
+        // Skip if either key is a special symbol (e.g., landmark)
+        bool is_special = false;
+        for (const char& s : special_symbols_) {
+          if (robot1 == s || robot2 == s) {
+            is_special = true;
+            break;
+          }
+        }
+        if (is_special) continue;
+
+        // Determine which stream to write to
+        std::ofstream* out_stream = nullptr;
+        if (robot1 == robot2) {
+          // Intra-robot loop closure
+          if (robot1 == 'a') {
+            out_stream = &intra_robot0_stream;
+          } else if (robot1 == 'b') {
+            out_stream = &intra_robot1_stream;
+          }
+          else {
+             throw std::runtime_error(std::string("Invalid robot1 value: ") + robot1);
+          }
+          // Skip other robot prefixes (could be special symbols)
+        } else {
+          // Inter-robot loop closure
+          out_stream = &inter_robot_stream;
+        }
+
+        // Check if this loop closure is an inlier and write it
+        if (out_stream && out_stream->is_open() && gnc_weights_(i) > 0.5) {
+          gtsam::SharedNoiseModel model = factor3D->noiseModel();
+          auto gaussianModel = factor_pointer_cast<gtsam::noiseModel::Gaussian>(model);
+          if (gaussianModel) {
+            Eigen::Matrix<double, 6, 6> Info = gaussianModel->R().transpose() * gaussianModel->R();
+            const gtsam::Pose3 pose3D = factor3D->measured();
+            const gtsam::Point3 p = pose3D.translation();
+            const auto q = pose3D.rotation().toQuaternion();
+            *out_stream << "EDGE_SE3:QUAT " << key1 << " " << key2
+                        << " " << p.x() << " " << p.y() << " " << p.z() << " " << q.x()
+                        << " " << q.y() << " " << q.z() << " " << q.w();
+            Eigen::Matrix<double, 6, 6> InfoG2o = Eigen::MatrixXd::Identity(6, 6);
+            InfoG2o.block<3, 3>(0, 0) = Info.block<3, 3>(3, 3);
+            InfoG2o.block<3, 3>(3, 3) = Info.block<3, 3>(0, 0);
+            InfoG2o.block<3, 3>(0, 3) = Info.block<3, 3>(0, 3);
+            InfoG2o.block<3, 3>(3, 0) = Info.block<3, 3>(3, 0);
+            for (size_t ii = 0; ii < 6; ii++) {
+              for (size_t jj = ii; jj < 6; jj++) {
+                *out_stream << " " << InfoG2o(ii, jj);
+              }
+            }
+            *out_stream << std::endl;
+          }
+        }
+      }
+    }
+    intra_robot0_stream.close();
+    intra_robot1_stream.close();
+    inter_robot_stream.close();
   }
 }
 
