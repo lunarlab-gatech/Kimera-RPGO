@@ -21,9 +21,11 @@ using namespace KimeraRPGO;
 
 /* Usage:
   ./RpgoReadG2o 2d <some-2d-g2o-file> <pcm_t_simple_thresh>
-  <pcm_R_simple_thresh> <gnc_barc_sq> <output-g2o-file> <verbosity> [or]
+  <pcm_R_simple_thresh> <gnc_barc_sq> <output-g2o-file> <verbosity>
+  <gnc_bias_odom> [or]
   ./RpgoReadG2o 3d <some-3d-g2o-file> <pcm_t_simple_thresh>
   <pcm_R_simple_thresh> <gnc_barc_sq> <output-g2o-file> <verbosity>
+  <gnc_bias_odom>
 */
 template <class T>
 void Simulate(gtsam::GraphAndValues gv,
@@ -118,6 +120,12 @@ int main(int argc, char* argv[]) {
     if (flag == "v") verbose = true;
   }
 
+  bool gnc_bias_odom = false;
+  if (argc > 8) {
+    std::string flag = argv[8];
+    if (flag == "1" || flag == "true") gnc_bias_odom = true;
+  }
+
   RobustSolverParams params;
 
   params.logOutput(output_folder);
@@ -135,6 +143,7 @@ int main(int argc, char* argv[]) {
 
     params.setPcmSimple2DParams(pcm_t, pcm_R, verbosity);
     params.setGncInlierCostThresholds(gnc_barcsq);
+    if (gnc_bias_odom) params.gncBiasOdom();
     params.setLmDiagonalDamping(false);
 
     Simulate<gtsam::Pose2>(graphNValues, params, output_folder);
@@ -144,6 +153,7 @@ int main(int argc, char* argv[]) {
 
     params.setPcmSimple3DParams(pcm_t, pcm_R, verbosity);
     params.setGncInlierCostThresholds(gnc_barcsq);
+    if (gnc_bias_odom) params.gncBiasOdom();
 
     Simulate<gtsam::Pose3>(graphNValues, params, output_folder);
 
