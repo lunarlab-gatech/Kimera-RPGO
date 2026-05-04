@@ -13,6 +13,9 @@ author: Yun Chang, Luca Carlone
 #include <gtsam/slam/dataset.h>
 
 #include <chrono>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -462,83 +465,101 @@ void RobustSolver::saveData(std::string folder_path) const {
       gnc_file.close();
     }
 
-    // Save inlier loop closures to separate g2o files by type
-    // Loop closures are BetweenFactors where key1 + 1 != key2 (non-consecutive keys)
-    std::ofstream intra_robot0_stream(folder_path + "/inlier_lc_intra_robot0.g2o");
-    std::ofstream intra_robot1_stream(folder_path + "/inlier_lc_intra_robot1.g2o");
-    std::ofstream inter_robot_stream(folder_path + "/inlier_lc_inter_robot.g2o");
+    // Save inlier loop closures to separate g2o files per robot and robot pair.
+    // Files are named by the gtsam character prefix (a, b, c, ...) which maps
+    // to data_params.runs order in the calling application.
+
+    // Collect all robot character prefixes present in the solution
+    std::set<char> robot_char_set;
+    for (gtsam::Key key : values_.keys()) {
+      char c = gtsam::Symbol(key).chr();
+      if (!isSpecialSymbol(c)) robot_char_set.insert(c);
+    }
+    std::vector<char> robot_chars(robot_char_set.begin(), robot_char_set.end());
+
+    // Open one intra-robot file per robot (may remain empty)
+    std::map<char, std::unique_ptr<std::ofstream>> intra_streams;
+    for (char c : robot_chars) {
+      intra_streams[c] = std::unique_ptr<std::ofstream>(
+          new std::ofstream(folder_path + "/inlier_lc_intra_" + std::string(1, c) + ".g2o"));
+    }
+
+    // Open one inter-robot file per ordered pair (may remain empty)
+    std::map<std::pair<char, char>, std::unique_ptr<std::ofstream>> inter_streams;
+    for (size_t ri = 0; ri < robot_chars.size(); ri++) {
+      for (size_t rj = ri + 1; rj < robot_chars.size(); rj++) {
+        char lo = robot_chars[ri], hi = robot_chars[rj];
+        inter_streams[{lo, hi}] = std::unique_ptr<std::ofstream>(
+            new std::ofstream(folder_path + "/inlier_lc_inter_" +
+                              std::string(1, lo) + "_" + std::string(1, hi) + ".g2o"));
+      }
+    }
 
     for (size_t i = 0; i < nfg_.size() && i < static_cast<size_t>(gnc_weights_.size()); i++) {
       const auto& factor_ = nfg_[i];
       auto factor3D = factor_pointer_cast<gtsam::BetweenFactor<gtsam::Pose3>>(factor_);
-      if (factor3D) {
-        gtsam::Key key1 = factor3D->key1();
-        gtsam::Key key2 = factor3D->key2();
-        // Skip odometry (consecutive keys)
-        if (key1 + 1 == key2) continue;
+      if (!factor3D) continue;
 
-        // Get robot prefixes using gtsam::Symbol
-        char robot1 = gtsam::Symbol(key1).chr();
-        char robot2 = gtsam::Symbol(key2).chr();
+      gtsam::Key key1 = factor3D->key1();
+      gtsam::Key key2 = factor3D->key2();
+      char c1 = gtsam::Symbol(key1).chr();
+      char c2 = gtsam::Symbol(key2).chr();
 
-        // Skip if either key is a special symbol (e.g., landmark)
-        bool is_special = false;
-        for (const char& s : special_symbols_) {
-          if (robot1 == s || robot2 == s) {
-            is_special = true;
-            break;
-          }
+      // Skip factors involving special symbols (e.g., landmarks)
+      if (isSpecialSymbol(c1) || isSpecialSymbol(c2)) continue;
+
+      // Skip same-robot odometry (consecutive same-robot keys).
+      // Consecutive keys from different robots (c1 != c2) would require a
+      // 2^56 key-index overflow and cannot be odometry, so fall through to
+      // treat them as loop closures.
+      if (key1 + 1 == key2 && c1 == c2) continue;
+
+      // Select the appropriate output stream
+      std::ofstream* out_stream = nullptr;
+      if (c1 == c2) {
+        auto it = intra_streams.find(c1);
+        if (it == intra_streams.end()) {
+          throw std::runtime_error(
+              std::string("No intra-robot stream for prefix: ") + c1);
         }
-        if (is_special) continue;
-
-        // Determine which stream to write to
-        std::ofstream* out_stream = nullptr;
-        if (robot1 == robot2) {
-          // Intra-robot loop closure
-          if (robot1 == 'a') {
-            out_stream = &intra_robot0_stream;
-          } else if (robot1 == 'b') {
-            out_stream = &intra_robot1_stream;
-          }
-          else {
-             throw std::runtime_error(std::string("Invalid robot1 value: ") + robot1);
-          }
-          // Skip other robot prefixes (could be special symbols)
-        } else {
-          // Inter-robot loop closure
-          out_stream = &inter_robot_stream;
+        out_stream = it->second.get();
+      } else {
+        char lo = std::min(c1, c2), hi = std::max(c1, c2);
+        auto it = inter_streams.find({lo, hi});
+        if (it == inter_streams.end()) {
+          throw std::runtime_error(
+              std::string("No inter-robot stream for pair: ") + lo + "_" + hi);
         }
+        out_stream = it->second.get();
+      }
 
-        // Check if this loop closure is an inlier and write it
-        if (out_stream && out_stream->is_open() && gnc_weights_(i) > 0.5) {
-          gtsam::SharedNoiseModel model = factor3D->noiseModel();
-          auto gaussianModel = factor_pointer_cast<gtsam::noiseModel::Gaussian>(model);
-          if (gaussianModel) {
-            Eigen::Matrix<double, 6, 6> Info = gaussianModel->R().transpose() * gaussianModel->R();
-            const gtsam::Pose3 pose3D = factor3D->measured();
-            const gtsam::Point3 p = pose3D.translation();
-            const auto q = pose3D.rotation().toQuaternion();
-            *out_stream << "EDGE_SE3:QUAT " << key1 << " " << key2
-                        << " " << p.x() << " " << p.y() << " " << p.z() << " " << q.x()
-                        << " " << q.y() << " " << q.z() << " " << q.w();
-            Eigen::Matrix<double, 6, 6> InfoG2o = Eigen::MatrixXd::Identity(6, 6);
-            InfoG2o.block<3, 3>(0, 0) = Info.block<3, 3>(3, 3);
-            InfoG2o.block<3, 3>(3, 3) = Info.block<3, 3>(0, 0);
-            InfoG2o.block<3, 3>(0, 3) = Info.block<3, 3>(0, 3);
-            InfoG2o.block<3, 3>(3, 0) = Info.block<3, 3>(3, 0);
-            for (size_t ii = 0; ii < 6; ii++) {
-              for (size_t jj = ii; jj < 6; jj++) {
-                *out_stream << " " << InfoG2o(ii, jj);
-              }
+      // Write inlier loop closure
+      if (out_stream && out_stream->is_open() && gnc_weights_(i) > 0.5) {
+        gtsam::SharedNoiseModel model = factor3D->noiseModel();
+        auto gaussianModel = factor_pointer_cast<gtsam::noiseModel::Gaussian>(model);
+        if (gaussianModel) {
+          Eigen::Matrix<double, 6, 6> Info = gaussianModel->R().transpose() * gaussianModel->R();
+          const gtsam::Pose3 pose3D = factor3D->measured();
+          const gtsam::Point3 p = pose3D.translation();
+          const auto q = pose3D.rotation().toQuaternion();
+          *out_stream << "EDGE_SE3:QUAT " << key1 << " " << key2
+                      << " " << p.x() << " " << p.y() << " " << p.z() << " " << q.x()
+                      << " " << q.y() << " " << q.z() << " " << q.w();
+          Eigen::Matrix<double, 6, 6> InfoG2o = Eigen::MatrixXd::Identity(6, 6);
+          InfoG2o.block<3, 3>(0, 0) = Info.block<3, 3>(3, 3);
+          InfoG2o.block<3, 3>(3, 3) = Info.block<3, 3>(0, 0);
+          InfoG2o.block<3, 3>(0, 3) = Info.block<3, 3>(0, 3);
+          InfoG2o.block<3, 3>(3, 0) = Info.block<3, 3>(3, 0);
+          for (size_t ii = 0; ii < 6; ii++) {
+            for (size_t jj = ii; jj < 6; jj++) {
+              *out_stream << " " << InfoG2o(ii, jj);
             }
-            *out_stream << std::endl;
           }
+          *out_stream << std::endl;
         }
       }
     }
-    intra_robot0_stream.close();
-    intra_robot1_stream.close();
-    inter_robot_stream.close();
+    // Streams are closed when unique_ptrs go out of scope
   }
 }
 
