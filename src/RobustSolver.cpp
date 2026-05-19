@@ -495,7 +495,21 @@ void RobustSolver::saveData(std::string folder_path) const {
       }
     }
 
+    // nfg_ is ordered: [nfg_odom_ | nfg_special_ | LC consistent_factors...]
+    // as established by Pcm::buildGraphToOptimize() (Pcm.h:978-993).
+    // The same boundary is used at lines 190-191 and 283-284.
+    // Skip all non-LC factors by index instead of using a key-adjacency
+    // heuristic, so that real LCs remapped to adjacent keyframe indices
+    // are not silently dropped.
+    // outlier_removal_ must be non-null when use_gnc_ is true — same
+    // assumption already made at line 109 which dereferences it directly.
+    assert(outlier_removal_);
+    size_t lc_start_idx = outlier_removal_->getNumOdomFactors() +
+                          outlier_removal_->getNumSpecialFactors();
+
     for (size_t i = 0; i < nfg_.size() && i < static_cast<size_t>(gnc_weights_.size()); i++) {
+      if (i < lc_start_idx) continue;  // skip odometry and special factors
+
       const auto& factor_ = nfg_[i];
       auto factor3D = factor_pointer_cast<gtsam::BetweenFactor<gtsam::Pose3>>(factor_);
       if (!factor3D) continue;
@@ -507,12 +521,6 @@ void RobustSolver::saveData(std::string folder_path) const {
 
       // Skip factors involving special symbols (e.g., landmarks)
       if (isSpecialSymbol(c1) || isSpecialSymbol(c2)) continue;
-
-      // Skip same-robot odometry (consecutive same-robot keys).
-      // Consecutive keys from different robots (c1 != c2) would require a
-      // 2^56 key-index overflow and cannot be odometry, so fall through to
-      // treat them as loop closures.
-      if (key1 + 1 == key2 && c1 == c2) continue;
 
       // Select the appropriate output stream
       std::ofstream* out_stream = nullptr;
@@ -542,6 +550,7 @@ void RobustSolver::saveData(std::string folder_path) const {
           const gtsam::Pose3 pose3D = factor3D->measured();
           const gtsam::Point3 p = pose3D.translation();
           const auto q = pose3D.rotation().toQuaternion();
+          *out_stream << "# LC:" << std::endl;
           *out_stream << "EDGE_SE3:QUAT " << key1 << " " << key2
                       << " " << p.x() << " " << p.y() << " " << p.z() << " " << q.x()
                       << " " << q.y() << " " << q.z() << " " << q.w();
