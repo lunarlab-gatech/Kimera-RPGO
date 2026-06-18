@@ -145,6 +145,7 @@ int main(int argc, char* argv[]) {
     params.setGncInlierCostThresholds(gnc_barcsq);
     if (gnc_bias_odom) params.gncBiasOdom();
     params.setLmDiagonalDamping(false);
+    params.setMultiRobotAlignMethod(MultiRobotAlignMethod::GNC);
 
     Simulate<gtsam::Pose2>(graphNValues, params, output_folder);
 
@@ -154,6 +155,7 @@ int main(int argc, char* argv[]) {
     params.setPcmSimple3DParams(pcm_t, pcm_R, verbosity);
     params.setGncInlierCostThresholds(gnc_barcsq);
     if (gnc_bias_odom) params.gncBiasOdom();
+    params.setMultiRobotAlignMethod(MultiRobotAlignMethod::GNC);
 
     Simulate<gtsam::Pose3>(graphNValues, params, output_folder);
 
