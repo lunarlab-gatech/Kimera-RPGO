@@ -13,6 +13,7 @@ author: Yun Chang, Luca Carlone
 #include <gtsam/slam/dataset.h>
 
 #include <chrono>
+#include <sys/stat.h>
 #include <map>
 #include <memory>
 #include <set>
@@ -351,7 +352,14 @@ void RobustSolver::update(const gtsam::NonlinearFactorGraph& factors,
     do_optimize = addAndCheckIfOptimize(factors, values);
   }
 
-  if (do_optimize && optimize_graph) optimize();  // optimize once after loading
+  if (do_optimize && optimize_graph) {
+    if (log_) {
+      std::string pre_opt_path = log_folder_ + "/pre_optimize";
+      mkdir(pre_opt_path.c_str(), 0755);
+      saveData(pre_opt_path);
+    }
+    optimize();
+  }
 
   // Stop timer and save
   auto stop = std::chrono::high_resolution_clock::now();
